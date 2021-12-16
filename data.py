@@ -6,9 +6,10 @@ from torch.utils.data import Dataset, DataLoader
 from model import ArielCNN
 
 from main import plot_spectrogram
-# DATA_DIR = "I:\CNES\ml_data_challenge_database\ml_data_challenge_database"
-DATA_DIR = "/media/matthieu/8917c2f9-55b5-458f-b893-826637dda6e6/CNES"
-MAX_TRAIN = 1000
+DATA_DIR = "I:\CNES\ml_data_challenge_database\ml_data_challenge_database"
+# DATA_DIR = "/media/matthieu/8917c2f9-55b5-458f-b893-826637dda6e6/CNES"
+MAX_TRAIN = -1
+MAX_EVAL = -1
 
 
 class ArielDataset(Dataset):
@@ -19,9 +20,9 @@ class ArielDataset(Dataset):
         self.data_dir = data_dir
         self.mode = mode
         if mode == 'train':
-            self.file_names = self.__load_files_names('noisy_train.txt', 'train')
+            self.file_names = self.__load_files_names('noisy_train_t.txt', 'train')
         elif mode == 'eval':
-            self.file_names = self.__load_files_names('noisy_train.txt', 'eval')
+            self.file_names = self.__load_files_names('noisy_train_v.txt', 'eval')
         elif mode == 'test':
             self.file_names = self.__load_files_names('noisy_test.txt', 'test')
     
@@ -31,12 +32,10 @@ class ArielDataset(Dataset):
         with open(os.path.join(self.data_dir, file_name)) as f:
             for line in f.readlines():
                 f_names.append(line.replace('\n', ''))
-        num_files = len(f_names)
-        split = int(0.8*num_files)
         if mode == 'train':
-            return f_names[:split][:MAX_TRAIN]
+            return f_names[:MAX_TRAIN]
         elif mode == 'eval':
-            return f_names[split:][:MAX_TRAIN]
+            return f_names[:MAX_EVAL]
         return f_names
         
     def __len__(self):

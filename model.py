@@ -1,4 +1,6 @@
 import math
+
+from numpy.lib.arraypad import pad
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -96,25 +98,25 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, Q, K, V):
         """
-            Q : query tensor [b, c, h, w]
-            K : key tensor [b, c, h, w]
-            V : value tensor [b, c, h, w]
+            Q : query tensor [b, c, n]
+            K : key tensor [b, c, n]
+            V : value tensor [b, c, n]
         """
         assert self.feat_size == Q.shape[1] == K.shape[1] == V.shape[1]
         assert Q.shape[0] == K.shape[0] == V.shape[0]
         
-        batch_size, c, h, w = Q.shape
+        batch_size, c, n = Q.shape
 
-        # [b, c, h, w] -> [b, h*w, c]
-        Q = Q.view(batch_size, self.feat_size, -1).permute(0, 2, 1)
-        K = K.view(batch_size, self.feat_size, -1).permute(0, 2, 1)
-        V = V.view(batch_size, self.feat_size, -1).permute(0, 2, 1)
+        # [b, c, n] -> [b, n, c]
+        Q = Q.permute(0, 2, 1)
+        K = K.permute(0, 2, 1)
+        V = V.permute(0, 2, 1)
 
         Q = self.q_fc(Q)
         K = self.k_fc(K)
         V = self.v_fc(V)
 
-        # Split into n heads : [b, h*w, c] -> [b, n_heads, h*w, head_size]
+        # Split into n heads : [b, n, c] -> [b, n_heads, n, head_size]
         Q = Q.view(batch_size, -1, self.n_heads, self.head_size).permute(0, 2, 1, 3)
         K = K.view(batch_size, -1, self.n_heads, self.head_size).permute(0, 2, 1, 3)
         V = V.view(batch_size, -1, self.n_heads, self.head_size).permute(0, 2, 1, 3)
@@ -123,11 +125,11 @@ class MultiHeadAttention(nn.Module):
         softmax = F.softmax(score, dim=-1)
         attention = torch.matmul(softmax, V)
         
-        attention = attention.permute(0, 2, 1, 3).contiguous().view(batch_size, h, w, self.feat_size)
+        attention = attention.permute(0, 2, 1, 3).contiguous().view(batch_size, n, self.feat_size)
 
         attention = self.final_fc(attention)
 
-        attention = attention.permute(0, 3, 1, 2)
+        attention = attention.permute(0, 2, 1)
 
         return attention
 
@@ -138,14 +140,14 @@ class FeedForward(nn.Module):
         self.fc2 = nn.Linear(hidden_size, feat_size)
 
     def forward(self, x):
-        b, c, h, w = x.shape
-        # [b, c, h, w] -> [b, h*w, c]
-        x = x.view(b, c, -1).permute(0, 2, 1)
+        b, c, n = x.shape
+        # [b, c, n] -> [b, n, c]
+        x = x.permute(0, 2, 1)
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)
-        # [b, h*w, c] -> [b, c, h, w]
-        x = x.permute(0, 2, 1).view(b, c, h, w)
+        # [b, n, c] -> [b, c, n]
+        x = x.permute(0, 2, 1)
         return x
 
 class Normalization(nn.Module):
@@ -156,16 +158,16 @@ class Normalization(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        b, c, h, w = x.shape
-        # [b, c, h, w] -> [b, h*w, c]
-        x = x.view(b, c, -1).permute(0, 2, 1)
+        b, c, n = x.shape
+        # [b, c, n] -> [b, n, c]
+        x = x.permute(0, 2, 1)
         norm = self.gamma * ((x - x.mean(dim=-1, keepdim=True)) / torch.sqrt(x.var(dim=-1, keepdim=True) + self.eps)) + self.beta
-        # [b, h*w, c] -> [b, c, h, w]
-        norm = x.permute(0, 2, 1).view(b, c, h, w)
+        # [b, n, c] -> [b, c, n]
+        norm = x.permute(0, 2, 1)
         return norm
 
 class TransformerLayer(nn.Module):
-    def __init__(self, fn, feat_size, hidden_size=2048):
+    def __init__(self, fn, feat_size, hidden_size=128):
         super(TransformerLayer, self).__init__()
         self.norm1 = Normalization(feat_size)
         self.norm2 = Normalization(feat_size)
@@ -274,7 +276,51 @@ class ArielCNN(nn.Module):
 
     return out, out_aux
 
+class CrossAttentionNet(nn.Module):
+  
+  def __init__(self, nb_selfAtt=3):
+    super(CrossAttentionNet, self).__init__()
+    self.out_query = torch.nn.Parameter(torch.randn(1, 55, 1))
+    
+    self.conv_in = nn.Sequential(
+      nn.Conv1d(55, 64, 3, padding=1),
+      nn.BatchNorm1d(64),
+      nn.ReLU(),
+      nn.Conv1d(64, 128, 1),
+      nn.BatchNorm1d(128),
+      nn.ReLU()
+    )
+    
+    self.selfAtt_layers = nn.ModuleList([
+      TransformerLayer(MultiHeadAttention(4, 128), 128) for _ in range(nb_selfAtt)
+    ])
+    
+    self.conv_out = nn.Sequential(
+      nn.Conv1d(128, 64, 1, padding=1),
+      nn.BatchNorm1d(64),
+      nn.ReLU(),
+      nn.Conv1d(64, 55, 1),
+      nn.BatchNorm1d(55)
+    )
+    
+  def forward(self, x):
+    
+    b, c, n = x.shape
+    query_out = self.out_query.repeat(b, 1, 1)
+    x = torch.cat((x, query_out), 2)
+    
+    out = self.conv_in(x)
+    for attLayer in self.selfAtt_layers:
+      out = attLayer(out, out, out)
+    
+    out = self.conv_out(out)
+    
+    return out[:,:,-1].squeeze(-1)
 
 
 if __name__ == '__main__':
-  model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
+  model = CrossAttentionNet().cuda()
+  
+  x = torch.randn(4, 55, 300).cuda()
+  y = model(x)
+  print(x.shape, y.shape)
