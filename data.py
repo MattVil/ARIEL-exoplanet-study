@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import random
 from torch.utils.data import Dataset, DataLoader
 
 from model import ArielCNN
@@ -8,8 +9,8 @@ from model import ArielCNN
 from main import plot_spectrogram
 DATA_DIR = "I:\CNES\ml_data_challenge_database\ml_data_challenge_database"
 # DATA_DIR = "/media/matthieu/8917c2f9-55b5-458f-b893-826637dda6e6/CNES"
-MAX_TRAIN = -1
-MAX_EVAL = -1
+MAX_TRAIN = 100000
+MAX_EVAL = 10000
 
 
 class ArielDataset(Dataset):
@@ -25,7 +26,7 @@ class ArielDataset(Dataset):
             self.file_names = self.__load_files_names('noisy_train_v.txt', 'eval')
         elif mode == 'test':
             self.file_names = self.__load_files_names('noisy_test.txt', 'test')
-    
+        # random.shuffle(self.file_names)
     
     def __load_files_names(self, file_name, mode):
         f_names = []
@@ -40,6 +41,19 @@ class ArielDataset(Dataset):
         
     def __len__(self):
         return len(self.file_names)
+    
+    def __normalize_infos(self, data, mode='min_max'):
+        min = torch.tensor([ 3103.7, 3.5, 0.1, 0.1,  1.8,  0.3])
+        max = torch.tensor([ 6995.7, 5.0, 3.3, 2.2, 13.5, 68.1])
+        mean = torch.tensor([4892.7, 4.6, 0.8, 0.8, 10.5,  6.5])
+        std = torch.tensor([  982.5, 0.3, 0.4, 0.3,  1.6,  6.0])
+        
+        if mode == 'min_max':
+            return (data-min)/(max-min)
+        elif mode == 'mean_std':
+            return (data-mean)/std
+        else:
+            return None
     
     def __getitem__(self, idx):
         infos = {}
@@ -64,8 +78,10 @@ class ArielDataset(Dataset):
                     else:
                         labels.append(line.replace('\n', '').split('\t'))
         infos['file_name'] = file_id
+        data_infos = self.__normalize_infos(torch.tensor([infos['star_temp'], infos['star_logg'], infos['star_rad'], infos['star_mass'], infos['star_k_mag'], infos['period']]), mode='mean_std')
         return {'infos': infos , 
                 'data': torch.tensor(np.array(data).astype(float)).type(torch.FloatTensor).cuda(), 
+                'data_infos' : data_infos.type(torch.FloatTensor).cuda(),
                 'params': torch.tensor(np.array(params).astype(float)).type(torch.FloatTensor).cuda(), 
                 'labels': torch.tensor(np.array(labels).astype(float)).squeeze(0).type(torch.FloatTensor).cuda(), 
                 'aux_labels': torch.tensor(np.array(aux_labels).astype(float)).type(torch.FloatTensor).cuda()}
@@ -78,7 +94,10 @@ if __name__ == '__main__':
         print(sample_batched['infos'], sample_batched['data'].shape, sample_batched['labels'].shape, sample_batched['aux_labels'].shape)
         X = sample_batched['data']
         X_aux = sample_batched['params']
+        infos = sample_batched['infos']
         print(X.shape, X_aux.shape)
         y, y_aux = model(X, X_aux)
         print(y.shape, y_aux.shape)
+        data2 = sample_batched['data_infos']
+        print(data2.shape, data2)
         break

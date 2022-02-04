@@ -27,6 +27,32 @@ def positionalencoding2d(feat_size, height, width):
     pe[feat_size + 1::2, :, :] = torch.cos(pos_h * div_term).transpose(0, 1).unsqueeze(2).repeat(1, 1, width)
     return pe
 
+class PositionalEncoding1D(nn.Module):
+    def __init__(self, channels):
+        """
+        :param channels: The last dimension of the tensor you want to apply pos emb to.
+        """
+        super(PositionalEncoding1D, self).__init__()
+        self.channels = channels
+        inv_freq = 1. / (10000 ** (torch.arange(0, channels, 2).float() / channels))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, tensor):
+        """
+        :param tensor: A 3d tensor of size (batch_size, x, ch)
+        :return: Positional Encoding Matrix of size (batch_size, x, ch)
+        """
+        if len(tensor.shape) != 3:
+            raise RuntimeError("The input tensor has to be 3d!")
+        batch_size, x, orig_ch = tensor.shape
+        pos_x = torch.arange(x, device=tensor.device).type(self.inv_freq.type())
+        sin_inp_x = torch.einsum("i,j->ij", pos_x, self.inv_freq)
+        emb_x = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()), dim=-1)
+        emb = torch.zeros((x,self.channels),device=tensor.device).type(tensor.type())
+        emb[:,:self.channels] = emb_x
+
+        return emb[None,:,:orig_ch].repeat(batch_size, 1, 1)
+
 class ResidualBlock(nn.Module):
   def __init__(self, in_channels, out_channels, stride, padding):
     super(ResidualBlock, self).__init__()
@@ -316,11 +342,127 @@ class CrossAttentionNet(nn.Module):
     out = self.conv_out(out)
     
     return out[:,:,-1].squeeze(-1)
+  
+
+class CrossAttentionNet_extended(nn.Module):
+  
+  def __init__(self, nb_selfAtt=3):
+    super(CrossAttentionNet_extended, self).__init__()
+    
+    self.out_query = torch.nn.Parameter(torch.randn(1, 55, 1))
+    self.pos_encoding = PositionalEncoding1D(128)
+    
+    
+    self.conv_in = nn.Sequential(
+      nn.Conv1d(55, 64, 3, padding=1),
+      nn.BatchNorm1d(64),
+      nn.ReLU(),
+      nn.Conv1d(64, 128, 1),
+      nn.BatchNorm1d(128),
+      nn.ReLU()
+    )
+    
+    self.selfAtt_layers = nn.ModuleList([
+      TransformerLayer(MultiHeadAttention(4, 128), 128) for _ in range(nb_selfAtt)
+    ])
+    
+    self.conv_out = nn.Sequential(
+      nn.Conv1d(128, 64, 1, padding=1),
+      nn.BatchNorm1d(64),
+      nn.ReLU(),
+      nn.Conv1d(64, 55, 1),
+      nn.BatchNorm1d(55)
+    )
+    
+    self.final_fc = nn.Sequential(
+      nn.Linear(55+6, 64),
+      nn.ReLU(),
+      nn.Linear(64, 64),
+      nn.ReLU(),
+      nn.Linear(64, 55)
+    )
+    
+  def forward(self, x, x2):
+    
+    b, c, n = x.shape
+    query_out = self.out_query.repeat(b, 1, 1)
+    x = torch.cat((x, query_out), 2)
+    
+    out = self.conv_in(x)
+    
+    pe = self.pos_encoding(out.permute(0, 2, 1)).permute(0, 2, 1)
+    out = out + pe
+    
+    for attLayer in self.selfAtt_layers:
+      out = attLayer(out, out, out)
+    
+    out = self.conv_out(out)
+    
+    out = torch.cat([out[:,:,-1].squeeze(-1), x2], dim=1)
+    out = self.final_fc(out)
+    return out
+
+class CrossAttentionNet_extended2(nn.Module):
+  
+  def __init__(self, nb_selfAtt=3):
+    super(CrossAttentionNet_extended2, self).__init__()
+    self.out_query = torch.nn.Parameter(torch.randn(1, 55, 1))
+    
+    self.conv_in = nn.Sequential(
+      nn.Conv1d(55, 64, 3, padding=1),
+      nn.BatchNorm1d(64),
+      nn.ReLU(),
+      nn.Conv1d(64, 128, 1),
+      nn.BatchNorm1d(128),
+      nn.ReLU()
+    )
+    
+    self.crossAtt_layer = TransformerLayer(MultiHeadAttention(1, 1), 1)
+    
+    self.selfAtt_layers = nn.ModuleList([
+      TransformerLayer(MultiHeadAttention(4, 128), 128) for _ in range(nb_selfAtt)
+    ])
+    
+    self.conv_out = nn.Sequential(
+      nn.Conv1d(128, 64, 1, padding=1),
+      nn.BatchNorm1d(64),
+      nn.ReLU(),
+      nn.Conv1d(64, 55, 1),
+      nn.BatchNorm1d(55)
+    )
+    
+    self.final_fc = nn.Sequential(
+      nn.Linear(55, 64),
+      nn.ReLU(),
+      nn.Linear(64, 64),
+      nn.ReLU(),
+      nn.Linear(64, 55)
+    )
+    
+  def forward(self, x, x2):
+    
+    b, c, n = x.shape
+    query_out = self.out_query.repeat(b, 1, 1)
+  
+    query_out = self.crossAtt_layer(query_out.permute(0, 2, 1), x2.unsqueeze(1), x2.unsqueeze(1)).permute(0, 2, 1)
+    
+    x = torch.cat((x, query_out), 2)
+    
+    out = self.conv_in(x)
+    for attLayer in self.selfAtt_layers:
+      out = attLayer(out, out, out)
+    
+    out = self.conv_out(out)
+    
+    out = out[:,:,-1].squeeze(-1)
+    out = self.final_fc(out)
+    return out
 
 
 if __name__ == '__main__':
-  model = CrossAttentionNet().cuda()
+  model = CrossAttentionNet_extended2().cuda()
   
   x = torch.randn(4, 55, 300).cuda()
-  y = model(x)
-  print(x.shape, y.shape)
+  x2 = torch.randn(4, 6).cuda()
+  y = model(x, x2)
+  print(x.shape, x2.shape, y.shape)
